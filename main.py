@@ -18,12 +18,17 @@ from pathlib import Path
 
 import numpy as np
 from torch.utils.data import DataLoader
+from types import MethodType
+import onnx
+from onnxsim import simplify
 import datasets
 import util.misc as utils
 import datasets.samplers as samplers
 from datasets import build_dataset, get_coco_api_from_dataset
 from engine import evaluate, train_one_epoch
+from export import multi_scale_deformable_attn_pytorch, MSMHDA_onnx_export
 from models import build_model
+from models.ops.modules import MSDeformAttn
 
 
 def get_args_parser():
@@ -123,7 +128,8 @@ def get_args_parser():
     parser.add_argument('--finetune', default='', help='finetune from checkpoint')
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
-    parser.add_argument('--eval', action='store_true')
+    parser.add_argument('--eval', action='store_true', help='evaluation model mAP')
+    parser.add_argument('--export', action='store_true', help='export pytorch model to onnx')
     parser.add_argument('--num_workers', default=2, type=int)
     parser.add_argument('--cache_mode', default=False, action='store_true', help='whether to cache images on memory')
 
@@ -256,7 +262,7 @@ def main(args):
             print('Missing Keys: {}'.format(missing_keys))
         if len(unexpected_keys) > 0:
             print('Unexpected Keys: {}'.format(unexpected_keys))
-        if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
+        if not (args.eval or args.export) and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
             import copy
             p_groups = copy.deepcopy(optimizer.param_groups)
             optimizer.load_state_dict(checkpoint['optimizer'])
@@ -274,10 +280,26 @@ def main(args):
             lr_scheduler.step(lr_scheduler.last_epoch)
             args.start_epoch = checkpoint['epoch'] + 1
         # check the resumed model
-        if not args.eval:
+        if not (args.eval or args.export):
             test_stats, coco_evaluator = evaluate(
                 model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
             )
+
+    if args.export:
+        model.eval()
+        for module in model.modules():
+            if isinstance(module, MSDeformAttn):
+                module.forward = MethodType(MSMHDA_onnx_export, module)
+        image = torch.zeros(2, 3, 800, 800)
+        torch.onnx.export(model.cpu(), image, args.resume.replace('pth', 'onnx'), input_names=['input'],
+                          output_names=['output'],
+                          opset_version=16)
+        model_simple, check = simplify(
+            args.resume.replace('pth', 'onnx'),
+        )
+        assert check, "Failed to simplify ONNX model."
+        onnx.save(model_simple, args.resume.replace('pth', 'onnx'))
+        return
     
     if args.eval:
         test_stats, coco_evaluator = evaluate(model, criterion, postprocessors,
