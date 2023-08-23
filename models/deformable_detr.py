@@ -181,6 +181,8 @@ class DeformableDETR(nn.Module):
 
         out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1],
                'init_reference': init_reference}
+        if torch.onnx.is_in_onnx_export():
+            return torch.cat([out['pred_boxes'], out['pred_logits']], dim=-1)
         if self.aux_loss:
             out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord)
 

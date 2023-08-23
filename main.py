@@ -21,6 +21,8 @@ from torch.utils.data import DataLoader
 from types import MethodType
 import onnx
 from onnxsim import simplify
+import onnxruntime
+
 import datasets
 import util.misc as utils
 import datasets.samplers as samplers
@@ -45,7 +47,6 @@ def get_args_parser():
     parser.add_argument('--lr_drop_epochs', default=None, type=int, nargs='+')
     parser.add_argument('--clip_max_norm', default=0.1, type=float,
                         help='gradient clipping max norm')
-
 
     parser.add_argument('--sgd', action='store_true')
 
@@ -290,7 +291,7 @@ def main(args):
         for module in model.modules():
             if isinstance(module, MSDeformAttn):
                 module.forward = MethodType(MSMHDA_onnx_export, module)
-        image = torch.zeros(2, 3, 800, 800)
+        image = torch.zeros(1, 3, 800, 800)
         torch.onnx.export(model.cpu(), image, args.resume.replace('pth', 'onnx'), input_names=['input'],
                           output_names=['output'],
                           opset_version=16)
@@ -299,6 +300,21 @@ def main(args):
         )
         assert check, "Failed to simplify ONNX model."
         onnx.save(model_simple, args.resume.replace('pth', 'onnx'))
+        onnx_session = onnxruntime.InferenceSession(
+            args.resume.replace('pth', 'onnx'), providers=["CUDAExecutionProvider"]
+        )
+        onnx_inputs = {onnx_session.get_inputs()[0].name: image.numpy()}
+        onnx_outputs = onnx_session.run(None, onnx_inputs)
+        with torch.no_grad():
+            model_outputs = model(image)
+
+        np.testing.assert_allclose(
+            model_outputs["pred_logits"].numpy(), onnx_outputs[0][..., 4:], rtol=1e-03, atol=1e-05
+        )
+        np.testing.assert_allclose(
+            model_outputs["pred_boxes"].numpy(), onnx_outputs[0][..., :4], rtol=1e-03, atol=1e-05
+        )
+        print("ONNX Successfully converted!")
         return
     
     if args.eval:

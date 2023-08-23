@@ -1,4 +1,9 @@
+torch
+numpy
 pycocotools
 tqdm
 cython
 scipy
+onnx
+onnxsim
+onnxruntime
